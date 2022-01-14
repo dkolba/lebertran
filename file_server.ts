@@ -12,6 +12,9 @@ import { parse } from "./deps.ts";
 import { assert } from "./deps.ts";
 import { red } from "./deps.ts";
 
+let watcher: Deno.FsWatcher;
+let allWsSocks: any = [];
+
 const DEFAULT_CHUNK_SIZE = 16_640;
 
 interface EntryInfo {
@@ -246,6 +249,8 @@ export async function serveFile(
   // Set mime-type using the file extension in filePath
   const contentTypeValue = contentType(filePath);
   if (contentTypeValue) {
+    console.log("contentTypeValue: ", contentTypeValue);
+
     headers.set("content-type", contentTypeValue);
   }
 
@@ -330,8 +335,34 @@ export async function serveFile(
     });
   }
 
+  const appendReloadScript = (host: string | null, secure: boolean): string => {
+    if (host === null) {
+      ("console.error('Cannot inject websocket reload script - header did not contain host')");
+    }
+    const protocol = secure ? "wss" : "ws";
+    return `<script>
+  const socket = new WebSocket('${protocol}://${host}');
+  socket.onopen = () => {
+    console.log('Socket connection open. Listening for events.');
+  };
+  socket.onmessage = (msg) => {
+    if (msg.data === 'reload') location.reload(true);
+  };
+</script>`;
+  };
+
+  // TODO(dunc): Also enable secure websocket script via wss
+  const appendReloadString = appendReloadScript(req.headers.get("host"), false);
+
+  const encodedAppendReloadString = encoder.encode(appendReloadString);
+  console.log("asdf length: ", encodedAppendReloadString.byteLength);
+
   // Set content length
-  const contentLength = end - start + 1;
+  const isHtmlFile = contentTypeValue === "text/html";
+  const reloadScriptLength = isHtmlFile
+    ? encodedAppendReloadString.byteLength
+    : 0;
+  const contentLength = end + reloadScriptLength - start + 1;
   headers.set("content-length", `${contentLength}`);
 
   // Create a stream of the file instead of loading it into memory
@@ -343,7 +374,16 @@ export async function serveFile(
     async pull(controller) {
       const bytes = new Uint8Array(DEFAULT_CHUNK_SIZE);
       const bytesRead = await file.read(bytes);
+      console.log("bytes: ", bytes);
+      console.log("bytesRead: ", bytesRead);
+      console.log("contentLength", contentLength);
+      console.log("bytesSent", bytesSent);
+
       if (bytesRead === null) {
+        if (isHtmlFile) {
+          console.log("aaaaaaaaaaaaaaaaaaa");
+          controller.enqueue(encodedAppendReloadString);
+        }
         file.close();
         controller.close();
         return;
@@ -360,7 +400,6 @@ export async function serveFile(
   });
 
   const statusText = STATUS_TEXT.get(status);
-
   return new Response(body, {
     status,
     statusText,
@@ -608,6 +647,21 @@ function normalizeURL(url: string): string {
 }
 
 function main(): void {
+  const asdf = async () => {
+    if (!watcher) {
+      watcher = Deno.watchFs("./public", { recursive: true });
+    }
+    for await (const event of watcher) {
+      if (event.kind === "modify") {
+        console.log("file changed!!!!");
+        allWsSocks.forEach((sock: any) => {
+          sock.send("reload");
+        });
+      }
+    }
+  };
+  asdf();
+
   const serverArgs = parse(Deno.args, {
     string: ["port", "host", "cert", "key"],
     boolean: ["help", "dir-listing", "dotfiles", "cors"],
@@ -651,6 +705,27 @@ function main(): void {
 
   const handler = async (req: Request): Promise<Response> => {
     let response: Response;
+    const isWebSocket = (reqe: Request): boolean =>
+      reqe.headers.get("upgrade") === "websocket";
+    if (isWebSocket(req)) {
+      console.log("isWebSocket: ", isWebSocket(req));
+      const { socket, response } = Deno.upgradeWebSocket(req);
+      socket.onopen = () => {
+        socket.send("Hello World!");
+      };
+      socket.onmessage = (e) => {
+        console.log("data in sock: ", e.data);
+        socket.close();
+      };
+      socket.onclose = () => console.log("WebSocket has been closed.");
+      socket.onerror = (e) => console.error("WebSocket error:", e);
+      allWsSocks.push(socket);
+      console.log("allWsSocks:", allWsSocks);
+
+      console.log("socket: ", socket);
+      console.log("response : ", response);
+      return response;
+    }
 
     try {
       const normalizedUrl = normalizeURL(req.url);
