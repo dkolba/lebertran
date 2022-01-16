@@ -12,8 +12,13 @@ import { parse } from "./deps.ts";
 import { assert } from "./deps.ts";
 import { red } from "./deps.ts";
 
+interface WebSocketWithId extends WebSocket {
+  id?: number;
+}
+
 let watcher: Deno.FsWatcher;
-let allWsSocks: any = [];
+const allWsSocks: WebSocketWithId[] = [];
+let wsDids = 0;
 
 const DEFAULT_CHUNK_SIZE = 16_640;
 
@@ -249,8 +254,6 @@ export async function serveFile(
   // Set mime-type using the file extension in filePath
   const contentTypeValue = contentType(filePath);
   if (contentTypeValue) {
-    console.log("contentTypeValue: ", contentTypeValue);
-
     headers.set("content-type", contentTypeValue);
   }
 
@@ -355,7 +358,6 @@ export async function serveFile(
   const appendReloadString = appendReloadScript(req.headers.get("host"), false);
 
   const encodedAppendReloadString = encoder.encode(appendReloadString);
-  console.log("asdf length: ", encodedAppendReloadString.byteLength);
 
   // Set content length
   const isHtmlFile = contentTypeValue === "text/html";
@@ -374,14 +376,8 @@ export async function serveFile(
     async pull(controller) {
       const bytes = new Uint8Array(DEFAULT_CHUNK_SIZE);
       const bytesRead = await file.read(bytes);
-      console.log("bytes: ", bytes);
-      console.log("bytesRead: ", bytesRead);
-      console.log("contentLength", contentLength);
-      console.log("bytesSent", bytesSent);
-
       if (bytesRead === null) {
         if (isHtmlFile) {
-          console.log("aaaaaaaaaaaaaaaaaaa");
           controller.enqueue(encodedAppendReloadString);
         }
         file.close();
@@ -647,21 +643,6 @@ function normalizeURL(url: string): string {
 }
 
 function main(): void {
-  const asdf = async () => {
-    if (!watcher) {
-      watcher = Deno.watchFs("./public", { recursive: true });
-    }
-    for await (const event of watcher) {
-      if (event.kind === "modify") {
-        console.log("file changed!!!!");
-        allWsSocks.forEach((sock: any) => {
-          sock.send("reload");
-        });
-      }
-    }
-  };
-  asdf();
-
   const serverArgs = parse(Deno.args, {
     string: ["port", "host", "cert", "key"],
     boolean: ["help", "dir-listing", "dotfiles", "cors"],
@@ -702,28 +683,48 @@ function main(): void {
   }
 
   const target = posix.resolve(serverArgs._[0] ?? "");
+  const watchFileChanges = async () => {
+    if (!watcher) {
+      watcher = Deno.watchFs(target, { recursive: true });
+    }
+    for await (const event of watcher) {
+      if (event.kind === "modify") {
+        allWsSocks.forEach((sock) => {
+          sock.send("reload");
+        });
+      }
+    }
+  };
+  watchFileChanges();
 
   const handler = async (req: Request): Promise<Response> => {
     let response: Response;
     const isWebSocket = (reqe: Request): boolean =>
       reqe.headers.get("upgrade") === "websocket";
     if (isWebSocket(req)) {
-      console.log("isWebSocket: ", isWebSocket(req));
-      const { socket, response } = Deno.upgradeWebSocket(req);
+      const upgradedWebSocket: Deno.WebSocketUpgrade =
+        Deno.upgradeWebSocket(req);
+      const {
+        socket,
+        response,
+      }: { socket: WebSocketWithId; response: Response } = upgradedWebSocket;
       socket.onopen = () => {
-        socket.send("Hello World!");
+        socket.send("Hello Socket!");
+        socket.id = wsDids++;
       };
       socket.onmessage = (e) => {
-        console.log("data in sock: ", e.data);
         socket.close();
       };
-      socket.onclose = () => console.log("WebSocket has been closed.");
+      socket.onclose = (s) => {
+        const foundClosingSocket = allWsSocks.findIndex(
+          (sock) => sock.id === socket.id
+        );
+        if (foundClosingSocket > -1) {
+          allWsSocks.splice(foundClosingSocket, 1);
+        }
+      };
       socket.onerror = (e) => console.error("WebSocket error:", e);
       allWsSocks.push(socket);
-      console.log("allWsSocks:", allWsSocks);
-
-      console.log("socket: ", socket);
-      console.log("response : ", response);
       return response;
     }
 
