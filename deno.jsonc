@@ -3,7 +3,5 @@
     "dev": "deno run --watch --allow-read --allow-net lebertran.ts -k localhost.key -c localhost.crt www",
     "certs": "openssl req -x509 -sha256 -nodes -newkey rsa:2048 -days 365 -subj '/CN=localhost' -keyout localhost.key -out localhost.crt"
   },
-  "imports": {
-    "std/": "https://deno.land/std@0.184.0/"
-  }
+  "importMap": "./import_map.json"
 }
